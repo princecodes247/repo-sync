@@ -1,0 +1,28 @@
+{
+  "name": "repo-sync",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "tsx watch src"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "commandstruct": "^0.3.0",
+    "crypto": "^1.0.1",
+    "fs-extra": "^11.2.0",
+    "hollywood-di": "^0.5.2",
+    "sade": "^1.8.1",
+    "simple-git": "^3.25.0",
+    "yargs": "^17.7.2"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/yargs": "^17.0.32",
+    "tsx": "^4.19.1",
+    "vitest": "^2.0.3"
+  }
+}
