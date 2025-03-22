@@ -1,7 +1,7 @@
 import * as fs from 'fs-extra';
 import * as path from 'node:path';
 import * as crypto from 'crypto';
-import simpleGit, { SimpleGit, SimpleGitOptions } from 'simple-git';
+import simpleGit, { DefaultLogFields, ListLogLine, SimpleGit, SimpleGitOptions } from 'simple-git';
 import { arg, createProgram, createCommand, flag } from "commandstruct";
 
 const pushCmd = createCommand("push")
@@ -15,9 +15,8 @@ const pushCmd = createCommand("push")
         try {
             const { git, paths } = await init(args.from, args.target)
             await cloneDevRepo(git, paths.DEV_REPO_PATH, paths.TEMP_CLONE_PATH);
-            const commitMessage = await getLastCommitMessage(paths.TEMP_CLONE_PATH);
-            copyFilesToLive(paths.TEMP_CLONE_PATH, paths.LIVE_REPO_PATH);
-            await updateLiveRepo(commitMessage, paths.LIVE_REPO_PATH);
+            // copyFilesToLive(paths.TEMP_CLONE_PATH, paths.LIVE_REPO_PATH);
+            await syncGitHistory(paths.TEMP_CLONE_PATH, paths.LIVE_REPO_PATH);
             fs.removeSync(paths.TEMP_CLONE_PATH);
         } catch (error) {
             console.error('RepoSync Error:', error);
@@ -35,8 +34,8 @@ prog.run();
 
 async function init(devRepoPath: string, liveRepoPath: string) {
     let DEV_REPO_PATH = devRepoPath.startsWith('http://') || devRepoPath.startsWith('https://') ? devRepoPath : path.resolve(devRepoPath);
-    let TEMP_CLONE_PATH = path.resolve(liveRepoPath + '_temp');
-    let LIVE_REPO_PATH = path.resolve(liveRepoPath);
+    let LIVE_REPO_PATH = liveRepoPath.startsWith('http://') || liveRepoPath.startsWith('https://') ? liveRepoPath : path.resolve(liveRepoPath);
+    let TEMP_CLONE_PATH = path.resolve('reposync_' + Date.now() + '_temp');
 
     // Initialize simple-git with options
     if (fs.existsSync(TEMP_CLONE_PATH)) {
@@ -155,16 +154,82 @@ function copyFilesToLive(tempPath: string, livePath: string) {
     synchronizeFiles(tempPath, livePath);
 }
 
-async function updateLiveRepo(commitMessage: string, livePath: string) {
+async function syncGitHistory(tempPath: string, livePath: string) {
     if (!fs.existsSync(livePath)) {
         fs.mkdirSync(livePath);
     }
     const liveGit = simpleGit(livePath);
+    const tempGit = simpleGit(tempPath);
 
     if (!(await liveGit.checkIsRepo())) {
-        await liveGit.init()
+        await liveGit.init();
     }
-    await liveGit.add('.');
-    await liveGit.commit(commitMessage);
-    console.log('RepoSync: Live repository updated and pushed successfully.', commitMessage);
+
+    // Get all commits from temp repository in reverse chronological order
+    const commits = await tempGit.log();
+    const orderedCommits = [...commits.all].reverse(); // Process from newest to oldest
+
+    // Get existing commit details from live repo to avoid duplicates
+    let existingCommits: readonly (DefaultLogFields & ListLogLine)[] = [];
+    try {
+        const liveCommits = await liveGit.log();
+        existingCommits = [...liveCommits.all];
+    } catch (error) {
+        console.log('RepoSync: Target repository is empty, proceeding with initial sync');
+    }
+
+    for (const commit of orderedCommits) {
+
+        // Check if this is a merge commit
+        const isMergeCommit = commit.message.toLowerCase().includes("merge");
+
+        // Modify commit message for merge commits
+        let commitMessage = commit.message;
+        if (isMergeCommit) {
+            commitMessage = `${commit.hash.slice(-5)}`;
+            console.log(`RepoSync: Processing merge commit: ${commitMessage}`);
+        }
+
+        // Check if this commit already exists by comparing multiple attributes
+        const matchingCommit = existingCommits.find(existingCommit => {
+            // Compare commit message (excluding merge commit special cases)
+            const messageMatches = commitMessage === existingCommit.message;
+            
+            // Compare commit date (allowing small time differences)
+            const dateMatches = Math.abs(new Date(commit.date).getTime() - 
+                                       new Date(existingCommit.date).getTime()) < 1000;
+            
+            return messageMatches && dateMatches;
+        });
+
+        if (matchingCommit) {
+            console.log(`RepoSync: Skipping existing commit with message: ${commit.message}`);
+            continue;
+        }
+
+
+        // Checkout this commit in the temp repository
+        await tempGit.checkout(commit.hash);
+
+        // Copy files at this commit state to live repository
+        copyFilesToLive(tempPath, livePath);
+
+        // Stage and commit changes with original commit info and date
+        await liveGit.add('.');
+        // Set both author and committer dates to match the original commit
+        process.env.GIT_COMMITTER_DATE = commit.date;
+        await liveGit.commit(commitMessage, {
+            '--date': commit.date
+        });
+        delete process.env.GIT_COMMITTER_DATE;
+
+        console.log(`RepoSync: Applied commit: ${commitMessage}`);
+    }
+
+    // Return to the latest commit in temp repo
+    if (commits.latest) {
+        await tempGit.checkout(commits.latest.hash);
+    }
+
+    console.log('RepoSync: Live repository updated successfully with complete commit history.');
 }
